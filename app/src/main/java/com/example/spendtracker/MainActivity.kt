@@ -1,6 +1,7 @@
 package com.example.spendtracker
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -12,6 +13,7 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.BaseAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -22,6 +24,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import java.text.SimpleDateFormat
@@ -46,6 +50,13 @@ class MainActivity : AppCompatActivity() {
     private val mf = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
     private var filter = "all"
     private var query = ""
+    private var catFilter = "All"
+    private var sortMode = 0
+    private var lastActive = 0L
+    private var prompting = false
+    private lateinit var catChip: TextView
+    private lateinit var sortChip: TextView
+    internal lateinit var lockView: FrameLayout
     private var items = listOf<Tx>()
     private val chipViews = HashMap<String, TextView>()
     private lateinit var monthBar: LinearLayout
@@ -74,6 +85,12 @@ class MainActivity : AppCompatActivity() {
             toast("SMS permission denied")
         }
     }
+
+    internal val restorePick = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) restoreFrom(uri)
+    }
+
+    internal val notifPerm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val adapter = object : BaseAdapter() {
         override fun getCount(): Int = items.size
@@ -246,6 +263,26 @@ class MainActivity : AppCompatActivity() {
         }
         txnPane.addView(search, lp(MP, WC).apply { setMargins(dp(12), dp(4), dp(12), 0) })
         txnPane.addView(chips)
+        val row2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12), 0, dp(12), dp(8))
+        }
+        catChip = tv("Category: All ▾", 13f, Ui.primary, true).apply {
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = Ui.rounded(Ui.soft, dp(16).toFloat())
+            setOnClickListener { pickCatFilter() }
+        }
+        sortChip = tv("Sort: Newest ▾", 13f, Ui.primary, true).apply {
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            background = Ui.rounded(Ui.soft, dp(16).toFloat())
+            setOnClickListener {
+                sortMode = (sortMode + 1) % 3
+                refreshList()
+            }
+        }
+        row2.addView(catChip, lp(WC, WC).apply { rightMargin = dp(8) })
+        row2.addView(sortChip, lp(WC, WC))
+        txnPane.addView(row2)
         txnPane.addView(listView, lp(MP, 0, 1f))
         txnPane.addView(emptyView, lp(MP, WC))
 
@@ -281,9 +318,91 @@ class MainActivity : AppCompatActivity() {
         root.addView(monthBar)
         root.addView(frame, lp(MP, 0, 1f))
         root.addView(nav)
-        setContentView(root)
+        val outer = FrameLayout(this)
+        outer.addView(root, FrameLayout.LayoutParams(MP, MP))
+        lockView = FrameLayout(this).apply {
+            setBackgroundColor(Ui.bg)
+            visibility = View.GONE
+            isClickable = true
+        }
+        val lbox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        lbox.addView(tv("🔒", 40f).apply { gravity = Gravity.CENTER }, lp(WC, WC))
+        lbox.addView(tv("Spend Tracker is locked", 16f, Ui.text, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(12), 0, dp(16))
+        }, lp(WC, WC))
+        lbox.addView(btn("Unlock") { if (!prompting) authenticate() }, lp(dp(200), WC))
+        lockView.addView(lbox, FrameLayout.LayoutParams(MP, MP))
+        outer.addView(lockView, FrameLayout.LayoutParams(MP, MP))
+        setContentView(outer)
+        applySecure()
 
         if (hasSms()) maybeFirstImport() else perm.launch(arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS))
+    }
+
+    private fun authFlags(): Int =
+        BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+
+    internal fun canLock(): Boolean =
+        BiometricManager.from(this).canAuthenticate(authFlags()) == BiometricManager.BIOMETRIC_SUCCESS
+
+    internal fun applySecure() {
+        if (prefs.getBoolean("lock", false)) {
+            window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
+    private fun authenticate() {
+        prompting = true
+        val cb = object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                prompting = false
+                lastActive = System.currentTimeMillis()
+                lockView.visibility = View.GONE
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                prompting = false
+            }
+        }
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Unlock Spend Tracker")
+            .setAllowedAuthenticators(authFlags())
+            .build()
+        BiometricPrompt(this, ContextCompat.getMainExecutor(this), cb).authenticate(info)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!prefs.getBoolean("lock", false) || !canLock()) {
+            lockView.visibility = View.GONE
+            return
+        }
+        if (lockView.visibility == View.VISIBLE || System.currentTimeMillis() - lastActive > 30000) {
+            lockView.visibility = View.VISIBLE
+            if (!prompting) authenticate()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        lastActive = System.currentTimeMillis()
+    }
+
+    private fun pickCatFilter() {
+        val opts = (listOf("All") + Ui.cats + listOf("Income")).toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Filter by category")
+            .setItems(opts) { _, i ->
+                catFilter = opts[i]
+                refreshList()
+            }
+            .show()
     }
 
     override fun onResume() {
@@ -319,9 +438,17 @@ class MainActivity : AppCompatActivity() {
             v.background = Ui.rounded(if (on) Ui.primary else Ui.soft, dp(16).toFloat())
         }
         val q = query.lowercase()
-        items = monthTx.filter {
+        catChip.text = "Category: $catFilter ▾"
+        sortChip.text = "Sort: " + listOf("Newest", "Highest", "Lowest")[sortMode] + " ▾"
+        val base = monthTx.filter {
             (filter == "all" || it.type == filter) &&
+                (catFilter == "All" || it.cat == catFilter) &&
                 (q.isEmpty() || it.merchant.lowercase().contains(q) || it.cat.lowercase().contains(q))
+        }
+        items = when (sortMode) {
+            1 -> base.sortedByDescending { it.amount }
+            2 -> base.sortedBy { it.amount }
+            else -> base
         }
         adapter.notifyDataSetChanged()
         listView.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
