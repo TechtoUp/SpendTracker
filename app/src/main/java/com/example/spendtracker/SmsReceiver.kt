@@ -12,6 +12,12 @@ class SmsReceiver : BroadcastReceiver() {
         val body = msgs.joinToString("") { it.messageBody ?: "" }
         val ts = msgs[0].timestampMillis
         val p = Parser.parse(body) ?: return
-        Db(c).add(ts, p.type, p.amount, p.merchant, p.cat, "sms")
+        val ok = Db(c).add(ts, p.type, p.amount, p.merchant, p.cat, "sms")
+        if (ok) {
+            try {
+                Alerts.check(c)
+            } catch (x: Exception) {
+            }
+        }
     }
 }
