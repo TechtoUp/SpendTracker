@@ -64,6 +64,29 @@ fun MainActivity.buildDash() {
         dash.addView(c)
     }
 
+    if (!allTime) {
+        val cb = Ui.cats.filter { prefs.getFloat("cb_$it", 0f) > 0f }
+        if (cb.isNotEmpty()) {
+            val bc = card()
+            bc.addView(tv("Category budgets", 15f, Ui.text, true))
+            cb.forEach { name ->
+                val lim = prefs.getFloat("cb_$name", 0f).toDouble()
+                val used = spendTx.filter { it.cat == name }.sumOf { it.amount }
+                val pc = used / lim
+                val col = if (pc > 1) Ui.red else if (pc > 0.8) Color.parseColor("#F59E0B") else Ui.primary
+                val r = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, dp(10), 0, dp(3))
+                }
+                r.addView(tv(name, 14f), lp(0, WC, 1f))
+                r.addView(tv("${money(used)} / ${money(lim)}", 13f, if (pc > 1) Ui.red else Ui.text, true))
+                bc.addView(r)
+                bc.addView(progress(pc, col), lp(MP, dp(6)))
+            }
+            dash.addView(bc)
+        }
+    }
+
     val byCat = spendTx.groupBy { it.cat }
         .map { e -> Pair(e.key, e.value.sumOf { it.amount }) }
         .sortedByDescending { it.second }
