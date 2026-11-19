@@ -10,10 +10,14 @@ object Parser {
         "\\b(otp|one time|will be|due|requested|request|minimum|offer|cashback offer|pre-approved|preapproved|apply now|click|failed|declined|unsuccessful|insufficient)\\b",
         RegexOption.IGNORE_CASE
     )
+    private val pre = Regex("^(?:(?:upi|pos|ecom|vps|bil|ib|neft|imps|paytm|gpay|phonepe)[-*/:]+|(?:upi|pos|ecom)\\s+)", RegexOption.IGNORE_CASE)
+    private val tail = Regex("[\\s\\-_*#/]*\\d{4,}\\w*$")
+    private val sep = Regex("[._\\-*/]+")
+    private val sp = Regex("\\s+")
     private val atm = Regex("\\batm\\b|cash withdrawal", RegexOption.IGNORE_CASE)
     private val nonAlnum = Regex("[^a-z0-9]")
     private val mer = Regex(
-        "(?:\\bto|\\bat|towards|\\bfrom|\\bby|VPA|info[:\\-])\\s+([A-Za-z0-9@._&' -]{2,40}?)(?=\\s+(?:on|ref|via|using|avl|bal|upi|a/c|acct|from|for)\\b|[.,;(]|$)",
+        "(?:\\bto|\\bat|towards|\\bfrom|\\bby|VPA|info[:\\-])\\s+([A-Za-z0-9@._&*' -]{2,40}?)(?=\\s+(?:on|ref|via|using|avl|bal|upi|a/c|acct|from|for)\\b|[.,;(]|$)",
         RegexOption.IGNORE_CASE
     )
 
@@ -49,6 +53,30 @@ object Parser {
         return null
     }
 
+    fun cleanMerchant(raw: String): String {
+        var s = raw.trim()
+        val at = s.indexOf('@')
+        if (at > 0) s = s.substring(0, at)
+        s = pre.replace(s, "")
+        s = tail.replace(s, "")
+        s = sep.replace(s, " ")
+        s = sp.replace(s, " ").trim()
+        if (s.isEmpty() || s.all { it.isDigit() || it == ' ' } || s.equals("unknown", true)) return "Unknown"
+        if (s.length > 30) s = s.substring(0, 30).trim()
+        return s.split(' ').joinToString(" ") { w ->
+            if (w.length <= 3 && w == w.uppercase()) w else w.lowercase().replaceFirstChar { it.uppercase() }
+        }
+    }
+
+    fun explain(text: String): String {
+        val t = text.replace("\n", " ").trim()
+        val k = skip.find(t)
+        if (k != null) return "skipped: word '" + k.value + "'"
+        if (pickAmount(t) == null) return "skipped: no amount (Rs / INR / ₹)"
+        if (dr.find(t) == null && cr.find(t) == null) return "skipped: no debit or credit word"
+        return "ok"
+    }
+
     fun parse(text: String): Parsed? {
         val t = text.replace("\n", " ").trim()
         if (skip.containsMatchIn(t)) return null
@@ -57,9 +85,8 @@ object Parser {
         val c = cr.find(t)?.range?.first ?: Int.MAX_VALUE
         if (d == Int.MAX_VALUE && c == Int.MAX_VALUE) return null
         val type = if (d < c) "debit" else "credit"
-        var m = mer.find(t)?.groupValues?.get(1)?.trim()?.trimEnd('-', ' ') ?: "Unknown"
+        var m = cleanMerchant(mer.find(t)?.groupValues?.get(1)?.trim()?.trimEnd('-', ' ') ?: "Unknown")
         if (type == "debit" && atm.containsMatchIn(t)) m = "ATM Withdrawal"
-        if (m.isBlank()) m = "Unknown"
         val cat = if (m == "ATM Withdrawal") "Cash" else category(m, type)
         return Parsed(type, amount, m, cat)
     }
