@@ -109,3 +109,164 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "spend.db", nu
         try {
             f()
             d.setTransactionSuccessful()
+        } finally {
+            d.endTransaction()
+        }
+    }
+
+    fun range(from: Long, to: Long): List<Tx> {
+        val out = ArrayList<Tx>()
+        val c = readableDatabase.rawQuery(
+            "SELECT id,ts,type,amount,merchant,cat,src FROM tx WHERE ts>=? AND ts<? ORDER BY ts DESC",
+            arrayOf(from.toString(), to.toString())
+        )
+        while (c.moveToNext()) {
+            out.add(Tx(c.getLong(0), c.getLong(1), c.getString(2), c.getDouble(3), c.getString(4), c.getString(5), c.getString(6)))
+        }
+        c.close()
+        return out
+    }
+
+    fun spent(from: Long, to: Long): Double {
+        val c = readableDatabase.rawQuery(
+            "SELECT COALESCE(SUM(amount),0) FROM tx WHERE type='debit' AND ts>=? AND ts<?",
+            arrayOf(from.toString(), to.toString())
+        )
+        val r = if (c.moveToFirst()) c.getDouble(0) else 0.0
+        c.close()
+        return r
+    }
+
+    fun spentByCat(from: Long, to: Long): Map<String, Double> {
+        val out = HashMap<String, Double>()
+        val c = readableDatabase.rawQuery(
+            "SELECT cat,SUM(amount) FROM tx WHERE type='debit' AND ts>=? AND ts<? GROUP BY cat",
+            arrayOf(from.toString(), to.toString())
+        )
+        while (c.moveToNext()) out[c.getString(0)] = c.getDouble(1)
+        c.close()
+        return out
+    }
+
+    fun count(): Int {
+        val c = readableDatabase.rawQuery("SELECT COUNT(*) FROM tx", null)
+        val r = if (c.moveToFirst()) c.getInt(0) else 0
+        c.close()
+        return r
+    }
+
+    fun minTs(): Long {
+        val c = readableDatabase.rawQuery("SELECT MIN(ts) FROM tx", null)
+        val r = if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
+        c.close()
+        return r
+    }
+
+    @Synchronized
+    fun setCat(id: Long, merchant: String, cat: String) {
+        val d = writableDatabase
+        d.execSQL("UPDATE tx SET cat=? WHERE id=?", arrayOf<Any>(cat, id))
+        if (merchant.isNotBlank() && merchant != "Unknown") {
+            val k = merchant.lowercase()
+            d.execSQL("INSERT OR REPLACE INTO rules(merchant,cat) VALUES(?,?)", arrayOf<Any>(k, cat))
+            d.execSQL(
+                "UPDATE tx SET cat=? WHERE type='debit' AND (lower(merchant)=? OR lower(merchant) LIKE ?)",
+                arrayOf<Any>(cat, k, "$k %")
+            )
+        }
+    }
+
+    @Synchronized
+    fun recategorize(): Int {
+        val d = writableDatabase
+        var n = 0
+        d.beginTransaction()
+        try {
+            val old = loadRules(d)
+            d.execSQL("DELETE FROM rules")
+            for ((k, c) in old) {
+                val nk = Parser.cleanMerchant(k).lowercase()
+                if (nk != "unknown") d.execSQL("INSERT OR REPLACE INTO rules(merchant,cat) VALUES(?,?)", arrayOf<Any>(nk, c))
+            }
+            val rules = loadRules(d)
+            val rows = ArrayList<Tx>()
+            val c = d.rawQuery("SELECT id,ts,type,amount,merchant,cat,src FROM tx WHERE type='debit' AND src<>'manual'", null)
+            while (c.moveToNext()) {
+                rows.add(Tx(c.getLong(0), c.getLong(1), c.getString(2), c.getDouble(3), c.getString(4), c.getString(5), c.getString(6)))
+            }
+            c.close()
+            for (r in rows) {
+                val nm = if (r.merchant == "ATM Withdrawal") r.merchant else Parser.cleanMerchant(r.merchant)
+                val rule = matchRule(rules, nm)
+                val nc = rule ?: (if (r.cat == "Other") Parser.category(nm, "debit") else r.cat)
+                if (nm != r.merchant || nc != r.cat) {
+                    d.execSQL("UPDATE tx SET merchant=?, cat=? WHERE id=?", arrayOf<Any>(nm, nc, r.id))
+                    n++
+                }
+            }
+            d.setTransactionSuccessful()
+        } finally {
+            d.endTransaction()
+        }
+        return n
+    }
+
+    fun allRules(): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        val c = readableDatabase.rawQuery("SELECT merchant,cat FROM rules", null)
+        while (c.moveToNext()) out.add(Pair(c.getString(0), c.getString(1)))
+        c.close()
+        return out
+    }
+
+    @Synchronized
+    fun putRule(merchant: String, cat: String) {
+        writableDatabase.execSQL("INSERT OR REPLACE INTO rules(merchant,cat) VALUES(?,?)", arrayOf<Any>(merchant.lowercase(), cat))
+    }
+
+    @Synchronized
+    fun restoreTx(ts: Long, type: String, amount: Double, merchant: String, cat: String, src: String): Boolean {
+        val c = writableDatabase.rawQuery(
+            "SELECT 1 FROM tx WHERE ts=? AND type=? AND amount=CAST(? AS REAL) AND merchant=? LIMIT 1",
+            arrayOf(ts.toString(), type, amount.toString(), merchant)
+        )
+        val dup = c.moveToFirst()
+        c.close()
+        if (dup) return false
+        insertRaw(ts, type, amount, merchant, cat, src)
+        return true
+    }
+
+    @Synchronized
+    fun log(pkg: String, body: String, res: String) {
+        val d = writableDatabase
+        val v = ContentValues().apply {
+            put("ts", System.currentTimeMillis())
+            put("pkg", pkg)
+            put("body", body.take(200))
+            put("res", res)
+        }
+        d.insert("nlog", null, v)
+        d.execSQL("DELETE FROM nlog WHERE id NOT IN (SELECT id FROM nlog ORDER BY id DESC LIMIT 100)")
+    }
+
+    fun logs(): List<LogRow> {
+        val out = ArrayList<LogRow>()
+        val c = readableDatabase.rawQuery("SELECT ts,pkg,body,res FROM nlog ORDER BY id DESC", null)
+        while (c.moveToNext()) out.add(LogRow(c.getLong(0), c.getString(1), c.getString(2), c.getString(3)))
+        c.close()
+        return out
+    }
+
+    fun clearLogs() {
+        writableDatabase.delete("nlog", null, null)
+    }
+
+    fun del(id: Long) {
+        writableDatabase.delete("tx", "id=?", arrayOf(id.toString()))
+    }
+
+    fun clear() {
+        writableDatabase.delete("tx", null, null)
+    }
+}
