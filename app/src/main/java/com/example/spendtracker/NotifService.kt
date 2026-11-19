@@ -20,17 +20,33 @@ class NotifService : NotificationListenerService() {
         "com.microsoft.office.outlook"
     )
 
-    private val mailKey = Regex("slice", RegexOption.IGNORE_CASE)
-
     private val keys = listOf("android.title", "android.text", "android.bigText", "android.subText")
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val isMail = sbn.packageName in mail
-        if (sbn.packageName !in pk && !isMail) return
+        val pkg = sbn.packageName
+        val isMail = pkg in mail
+        if (pkg !in pk && !isMail) return
         val e = sbn.notification.extras
-        val t = keys.joinToString(" ") { e.getCharSequence(it)?.toString() ?: "" }
-        if (isMail && !mailKey.containsMatchIn(t)) return
-        val p = Parser.parse(t) ?: return
-        Db(this).add(sbn.postTime, p.type, p.amount, p.merchant, p.cat, "notif")
+        val t = keys.joinToString(" ") { e.getCharSequence(it)?.toString() ?: "" }.trim()
+        if (isMail) {
+            val kw = (getSharedPreferences("st", MODE_PRIVATE).getString("mail_keys", "slice") ?: "slice")
+                .split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+            val low = t.lowercase()
+            if (kw.none { low.contains(it) }) return
+        }
+        val db = Db(this)
+        val p = Parser.parse(t)
+        if (p == null) {
+            db.log(pkg, t, Parser.explain(t))
+            return
+        }
+        val ok = db.add(sbn.postTime, p.type, p.amount, p.merchant, p.cat, if (isMail) "mail" else "notif")
+        db.log(pkg, t, if (ok) "added " + p.type + " " + p.amount + " " + p.merchant else "duplicate, already saved")
+        if (ok) {
+            try {
+                Alerts.check(this)
+            } catch (x: Exception) {
+            }
+        }
     }
 }
