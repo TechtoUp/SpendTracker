@@ -151,6 +151,10 @@ fun MainActivity.addDialog() {
             val m = mer.text.toString().trim().ifEmpty { "Manual entry" }
             val type = if (inc.isChecked) "credit" else "debit"
             db.insertRaw(System.currentTimeMillis(), type, a, m, Parser.category(m, type), "manual")
+            try {
+                Alerts.check(this)
+            } catch (x: Exception) {
+            }
             refresh()
         }
         .setNegativeButton("Cancel", null)
